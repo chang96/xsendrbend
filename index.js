@@ -16,7 +16,7 @@ app.use(cors())
 app.get("/", (req, res)=> {
     let room = req.query.room || "xyz"
     console.log(room)
-  
+    res.send("running")
 })
 
 io.on("connection", function(socket){
