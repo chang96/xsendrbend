@@ -8,14 +8,12 @@ const cors = require("cors")
 const nano = require("nanoid")
 const path = require("path")
 const ss = require("socket.io-stream")
+const fs = require("fs")
 app.use(cors())
-// app.get("/", (req, res)=> {
 
-// })
 
 app.get("/", (req, res)=> {
     let room = req.query.room || "xyz"
-    console.log(room)
     res.send("running")
 })
 
@@ -37,33 +35,14 @@ io.on("connection", function(socket){
     })
 
     socket.on("messageFromClient", function(data){
-        console.log(data)
         socket.to(data.roomName).emit("messageFromServer", data)
     })
-    ss(socket).on("file", function(stream, data){
-        let filename = path.basename(data.name)
-        stream.pipe(fs.createWriteStream(filename))
+    ss(socket).on("file", function(roomName, data){
+        console.log("data",data, roomName)
+       
     })
 })
 
-// let createdRoom = io.of("/createroom")
-// createdRoom.on("connection", function(socket){
-//     let room = nano(4)
-//     console.log(room)
-//     socket.join(room)
-
-//     createdRoom.in(room).emit("connectToRoom", `you are connected to ${room}`)
-// })
-
-// let joinRoom = io.of("/joinroom")
-// joinRoom.on("connection", function(socket){
-    
-//     socket.on("room", function(data){
-//         console.log(data)
-//         socket.join(data)
-//         socket.broadcast.emit("connectToRoom", `you are c to ${data}`)
-//     })
-// })
 
 http.listen(PORT, function(PORT){
     console.log("running...")
