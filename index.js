@@ -27,7 +27,7 @@ io.on("connection", function(socket){
     })
 
     socket.on("joinRoom", function(data){
-        console.log(data)
+        // console.log(data)
         let roomName = data.roomName
         socket.join(roomName)
         socket.to(roomName).emit("joinedRoom", {room : roomName})
@@ -35,6 +35,7 @@ io.on("connection", function(socket){
     })
 
     socket.on("messageFromClient", function(data){
+        // console.log(data)
         socket.to(data.roomName).emit("messageFromServer", data)
     })
     ss(socket).on("file", function(roomName, data){
