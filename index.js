@@ -10,7 +10,19 @@ const path = require("path")
 const ss = require("socket.io-stream")
 const fs = require("fs")
 app.use(cors())
+function rep(str){
+    let splited = str.split("")
+    let res = splited.map(x=>{
+        if(x=== "_" || x==="-"){
+            return "a"
+        } else {
+            return x
+        }
+    })
 
+    return res.join("")
+
+}
 
 app.get("/", (req, res)=> {
     let room = req.query.room || "xyz"
@@ -21,7 +33,7 @@ io.on("connection", function(socket){
     socket.on("createRoom", function(data){
         if(data.room){
             let newRoom = nano(4)
-            socket.join(newRoom)
+            socket.join(rep(newRoom))
             socket.emit("newRoomis", newRoom)
         }
     })
