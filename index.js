@@ -42,6 +42,7 @@ io.on("connection", function(socket){
         // console.log(data)
         let roomName = data.roomName
         socket.join(roomName)
+        // console.log(roomName)
         socket.to(roomName).emit("joinedRoom", {room : roomName})
         socket.emit("joinedRoom", {room : roomName})
     })
@@ -54,6 +55,14 @@ io.on("connection", function(socket){
         console.log("data",data, roomName)
        
     })
+
+    socket.on("offer", function(data){
+        socket.to(data.room).emit("offerSent", data)
+    })
+    socket.on("offerReceived", function(data){
+        socket.to(data.room).emit("answerSent", data)
+    })
+
 })
 
 
