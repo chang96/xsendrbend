@@ -10,7 +10,7 @@ const nano = require("nanoid")
 const path = require("path")
 const ss = require("socket.io-stream")
 const fs = require("fs")
-app.use(cors())
+app.use(cors());
 function rep(str){
     let splited = str.split("")
     let res = splited.map(x=>{
