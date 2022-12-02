@@ -1,15 +1,15 @@
 //using chartlesstv@gmail.com on heroku
 const express = require("express");
-const app = express()
-const http = require("http").Server(app)
-const io = require("socket.io")(http)
-const PORT = process.env.PORT || 3001
-const ids = ["0xe8", "0xg7de", "0xhs8"]
-const cors = require("cors")
-const nano = require("nanoid")
-const path = require("path")
-const ss = require("socket.io-stream")
-const fs = require("fs")
+const app = express();
+const http = require("http").Server(app);
+const io = require("socket.io")(http);
+const PORT = process.env.PORT || 3001;
+const ids = ["0xe8", "0xg7de", "0xhs8"];
+const cors = require("cors");
+const nano = require("nanoid");
+const path = require("path");
+const ss = require("socket.io-stream");
+const fs = require("fs");
 app.use(cors());
 function rep(str){
     let splited = str.split("")
