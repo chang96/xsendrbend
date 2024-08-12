@@ -3,7 +3,7 @@ const express = require("express");
 const app = express();
 const http = require("http").Server(app);
 const io = require("socket.io")(http);
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 3009;
 const ids = ["0xe8", "0xg7de", "0xhs8"];
 const cors = require("cors");
 const nano = require("nanoid");
@@ -68,5 +68,5 @@ io.on("connection", function(socket){
 
 
 http.listen(PORT, function(PORT){
-    console.log("running...")
+    console.log("running..."+PORT)
 })

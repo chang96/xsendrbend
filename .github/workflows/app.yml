@@ -1,0 +1,18 @@
+name: app
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, faax]
+    steps:
+      - uses: actions/checkout@v3
+      - name: deploy faax
+        run: echo Deploying faax
+      - name: run docker
+        run: sudo docker compose --project-name=faax -f ./deployment/docker-compose.yml up faax --build --force-recreate --remove-orphans -d
+      - name: prune images
+        run: sudo docker image prune -a -f

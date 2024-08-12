@@ -1,0 +1,16 @@
+services:
+  faax:
+    build:
+        context: ..
+        dockerfile: ./deployment/Dockerfile
+    image: faax
+    container_name: faax-x
+    ports:
+      - "3009:3009"
+    restart: unless-stopped
+    networks:
+      - mynetwork
+
+networks:
+  mynetwork:
+    external: true
