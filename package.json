@@ -6,7 +6,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node index.js",
-    "build":""
+    "build": ""
   },
   "author": "",
   "license": "ISC",
@@ -15,7 +15,6 @@
     "dotenv": "^16.0.0",
     "express": "^4.17.3",
     "nanoid": "^2.1.11",
-    "shortid": "^2.2.16",
     "socket.io": "^4.4.1",
     "socket.io-stream": "^0.9.1"
   },
