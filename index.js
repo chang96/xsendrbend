@@ -4,25 +4,17 @@ const app = express();
 const http = require("http").Server(app);
 const io = require("socket.io")(http);
 const PORT = process.env.PORT || 3009;
-const ids = ["0xe8", "0xg7de", "0xhs8"];
 const cors = require("cors");
-const nano = require("nanoid");
 const path = require("path");
-const ss = require("socket.io-stream");
-const fs = require("fs");
 app.use(cors());
-function rep(str){
-    let splited = str.split("")
-    let res = splited.map(x=>{
-        if(x=== "_" || x==="-"){
-            return "a"
-        } else {
-            return x
-        }
-    })
 
-    return res.join("")
-
+function generateRoomId(length = 4) {
+    const chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let result = "";
+    for (let i = 0; i < length; i++) {
+        result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return result;
 }
 
 app.get("/", (req, res)=> {
@@ -33,17 +25,15 @@ app.get("/", (req, res)=> {
 io.on("connection", function(socket){
     socket.on("createRoom", function(data){
         if(data.room){
-            let newRoom = nano(4)
-            socket.join(rep(newRoom))
+            let newRoom = generateRoomId(4)
+            socket.join(newRoom)
             socket.emit("newRoomis", newRoom)
         }
     })
 
     socket.on("joinRoom", function(data){
-        // console.log(data)
-        let roomName = data.roomName
+        let roomName = String(data.roomName).toUpperCase()
         socket.join(roomName)
-        // console.log(roomName)
         socket.to(roomName).emit("joinedRoom", {room : roomName})
         socket.emit("joinedRoom", {room : roomName})
     })
@@ -52,9 +42,35 @@ io.on("connection", function(socket){
         // console.log(data)
         socket.to(data.roomName).emit("messageFromServer", data)
     })
-    ss(socket).on("file", function(roomName, data){
-        console.log("data",data, roomName)
-       
+
+    // Stateless Binary Relay Events
+    socket.on("file-meta-relay", function(data){
+        socket.to(data.roomName).emit("messageFromServer", {
+            xtype: "file-meta",
+            fileId: data.fileId,
+            name: data.name,
+            size: data.size,
+            type: data.type,
+            totalChunks: data.totalChunks
+        });
+    });
+
+    socket.on("file-chunk-relay", function(data){
+        socket.to(data.roomName).emit("file-chunk-received", {
+            fileId: data.fileId,
+            index: data.index,
+            chunk: data.chunk
+        });
+    });
+
+    socket.on("file-done-relay", function(data){
+        socket.to(data.roomName).emit("messageFromServer", {
+            xtype: "file-done",
+            fileId: data.fileId
+        });
+    });
+    socket.on("iceCandidate", function(data){
+        socket.to(data.room).emit("iceCandidateReceived", data)
     })
 
     socket.on("offer", function(data){

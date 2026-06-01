@@ -14,9 +14,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.0.0",
     "express": "^4.17.3",
-    "nanoid": "^2.1.11",
-    "socket.io": "^4.4.1",
-    "socket.io-stream": "^0.9.1"
+    "socket.io": "^4.4.1"
   },
   "devDependencies": {
     "nodemon": "^2.0.16"
