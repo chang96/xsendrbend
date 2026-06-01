@@ -76,6 +76,19 @@ io.on("connection", function(socket){
             index: data.index
         });
     });
+    socket.on("file-resume-request", function(data){
+        socket.to(data.roomName).emit("file-resume-request-received", {
+            fileId: data.fileId
+        });
+    });
+
+    socket.on("file-resume-response", function(data){
+        socket.to(data.roomName).emit("file-resume-response-received", {
+            fileId: data.fileId,
+            nextIndex: data.nextIndex
+        });
+    });
+
     socket.on("iceCandidate", function(data){
         socket.to(data.room).emit("iceCandidateReceived", data)
     })
