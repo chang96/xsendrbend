@@ -69,6 +69,13 @@ io.on("connection", function(socket){
             fileId: data.fileId
         });
     });
+
+    socket.on("file-chunk-ack", function(data){
+        socket.to(data.roomName).emit("file-chunk-ack-received", {
+            fileId: data.fileId,
+            index: data.index
+        });
+    });
     socket.on("iceCandidate", function(data){
         socket.to(data.room).emit("iceCandidateReceived", data)
     })
