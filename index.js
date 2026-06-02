@@ -51,7 +51,8 @@ io.on("connection", function(socket){
             name: data.name,
             size: data.size,
             type: data.type,
-            totalChunks: data.totalChunks
+            totalChunks: data.totalChunks,
+            noteId: data.noteId
         });
     });
 
