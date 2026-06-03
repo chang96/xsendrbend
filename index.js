@@ -6,7 +6,53 @@ const io = require("socket.io")(http);
 const PORT = process.env.PORT || 3009;
 const cors = require("cors");
 const path = require("path");
+const fs = require("fs");
 app.use(cors());
+
+const statsFilePath = path.join(__dirname, "stats.json");
+let completedTransfersCount = 0;
+let totalBytesTransferred = 0;
+let lastUpdated = null;
+const activeFileSizes = new Map();
+
+try {
+    if (fs.existsSync(statsFilePath)) {
+        const rawData = fs.readFileSync(statsFilePath);
+        const stats = JSON.parse(rawData);
+        completedTransfersCount = stats.completedTransfers || 0;
+        totalBytesTransferred = stats.totalBytesTransferred || 0;
+        lastUpdated = stats.lastUpdated || null;
+    } else {
+        lastUpdated = new Date().toISOString();
+        fs.writeFileSync(statsFilePath, JSON.stringify({
+            completedTransfers: 0,
+            totalBytesTransferred: 0,
+            lastUpdated: lastUpdated
+        }, null, 2));
+    }
+} catch (err) {
+    console.error("Error reading stats.json:", err);
+}
+
+function updateStats(additionalBytes, isCompletedTransfer = false) {
+    if (isCompletedTransfer) {
+        completedTransfersCount++;
+    }
+    if (additionalBytes > 0) {
+        totalBytesTransferred += additionalBytes;
+    }
+    lastUpdated = new Date().toISOString();
+
+    try {
+        fs.writeFileSync(statsFilePath, JSON.stringify({
+            completedTransfers: completedTransfersCount,
+            totalBytesTransferred: totalBytesTransferred,
+            lastUpdated: lastUpdated
+        }, null, 2));
+    } catch (err) {
+        console.error("Error writing to stats.json:", err);
+    }
+}
 
 function generateRoomId(length = 4) {
     const chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -21,6 +67,14 @@ app.get("/", (req, res)=> {
     let room = req.query.room || "xyz"
     res.send("running")
 })
+
+app.get("/transfers-count", (req, res) => {
+    res.json({
+        completedTransfers: completedTransfersCount,
+        totalBytesTransferred: totalBytesTransferred,
+        lastUpdated: lastUpdated
+    });
+});
 
 io.on("connection", function(socket){
     socket.on("createRoom", function(data){
@@ -40,11 +94,23 @@ io.on("connection", function(socket){
 
     socket.on("messageFromClient", function(data){
         // console.log(data)
+        let textLength = 0;
+        if (data.message && typeof data.message === "string") {
+            textLength = Buffer.byteLength(data.message, 'utf8');
+        } else if (data.text && typeof data.text === "string") {
+            textLength = Buffer.byteLength(data.text, 'utf8');
+        }
+        if (textLength > 0) {
+            updateStats(textLength, false);
+        }
         socket.to(data.roomName).emit("messageFromServer", data)
     })
 
     // Stateless Binary Relay Events
     socket.on("file-meta-relay", function(data){
+        if (data.fileId && typeof data.size === "number") {
+            activeFileSizes.set(data.fileId, data.size);
+        }
         socket.to(data.roomName).emit("messageFromServer", {
             xtype: "file-meta",
             fileId: data.fileId,
@@ -65,6 +131,12 @@ io.on("connection", function(socket){
     });
 
     socket.on("file-done-relay", function(data){
+        let size = 0;
+        if (data.fileId && activeFileSizes.has(data.fileId)) {
+            size = activeFileSizes.get(data.fileId);
+            activeFileSizes.delete(data.fileId);
+        }
+        updateStats(size, true);
         socket.to(data.roomName).emit("messageFromServer", {
             xtype: "file-done",
             fileId: data.fileId
