@@ -76,11 +76,20 @@ app.get("/transfers-count", (req, res) => {
     });
 });
 
+const getRoomCount = (roomName) => {
+    const clients = io.sockets.adapter.rooms.get(roomName);
+    return clients ? clients.size : 0;
+};
+
 io.on("connection", function(socket){
     socket.on("createRoom", function(data){
         if(data.room){
             let newRoom = generateRoomId(4)
             socket.join(newRoom)
+            
+            const count = getRoomCount(newRoom);
+            io.to(newRoom).emit("room-members-count", { count: count });
+            
             socket.emit("newRoomis", newRoom)
         }
     })
@@ -88,9 +97,22 @@ io.on("connection", function(socket){
     socket.on("joinRoom", function(data){
         let roomName = String(data.roomName).toUpperCase()
         socket.join(roomName)
+        
+        const count = getRoomCount(roomName);
+        io.to(roomName).emit("room-members-count", { count: count });
+        
         socket.to(roomName).emit("joinedRoom", {room : roomName})
         socket.emit("joinedRoom", {room : roomName})
     })
+
+    socket.on("disconnecting", () => {
+        for (const room of socket.rooms) {
+            if (room !== socket.id) {
+                const count = getRoomCount(room);
+                socket.to(room).emit("room-members-count", { count: Math.max(0, count - 1) });
+            }
+        }
+    });
 
     socket.on("messageFromClient", function(data){
         // console.log(data)
