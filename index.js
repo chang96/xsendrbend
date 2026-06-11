@@ -184,6 +184,10 @@ io.on("connection", function(socket){
         });
     });
 
+    socket.on("ping-server", function(){
+        socket.emit("pong-client");
+    });
+
     socket.on("iceCandidate", function(data){
         socket.to(data.room).emit("iceCandidateReceived", data)
     })
