@@ -7,9 +7,21 @@ const PORT = process.env.PORT || 3009;
 const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
+const { DATA_DIR } = require("./db");
+const registerAliasHandlers = require("./aliases");
+const { aliasExists } = require("./aliases");
 app.use(cors());
 
-const statsFilePath = path.join(__dirname, "stats.json");
+// stats.json now lives in the persistent data volume; migrate the old file once if present
+const statsFilePath = path.join(DATA_DIR, "stats.json");
+const legacyStatsPath = path.join(__dirname, "stats.json");
+try {
+    if (!fs.existsSync(statsFilePath) && fs.existsSync(legacyStatsPath)) {
+        fs.copyFileSync(legacyStatsPath, statsFilePath);
+    }
+} catch (err) {
+    console.error("Error migrating stats.json:", err);
+}
 let completedTransfersCount = 0;
 let totalBytesTransferred = 0;
 let lastUpdated = null;
@@ -81,7 +93,17 @@ const getRoomCount = (roomName) => {
     return clients ? clients.size : 0;
 };
 
+const emitRoomCount = (roomName) => {
+    io.to(roomName).emit("room-members-count", { count: getRoomCount(roomName) });
+};
+
+// Only sockets that are actually in a room may relay into it.
+// (Alias rooms "@name" can only be entered as an owner or an approved guest.)
+const inRoom = (socket, roomName) => typeof roomName === "string" && socket.rooms.has(roomName);
+
 io.on("connection", function(socket){
+    registerAliasHandlers(io, socket, { emitRoomCount });
+
     socket.on("createRoom", function(data){
         if(data.room){
             let newRoom = generateRoomId(4)
@@ -95,7 +117,20 @@ io.on("connection", function(socket){
     })
 
     socket.on("joinRoom", function(data){
-        let roomName = String(data.roomName).toUpperCase()
+        let raw = String((data && data.roomName) || "").trim()
+        let roomName = raw.toUpperCase()
+
+        // Alias rooms are never joinable directly
+        if (!roomName || roomName.startsWith("@") || roomName.startsWith("OWNERS:")) {
+            socket.emit("joinError", { error: "invalid_room" })
+            return
+        }
+        // No live throwaway room with this code, but it's someone's alias -> send them to the knock flow
+        if (!io.sockets.adapter.rooms.has(roomName) && aliasExists(raw)) {
+            socket.emit("aliasRoom", { alias: raw.toLowerCase().replace(/^@/, "") })
+            return
+        }
+
         socket.join(roomName)
         
         const count = getRoomCount(roomName);
@@ -107,7 +142,7 @@ io.on("connection", function(socket){
 
     socket.on("disconnecting", () => {
         for (const room of socket.rooms) {
-            if (room !== socket.id) {
+            if (room !== socket.id && !room.startsWith("owners:")) {
                 const count = getRoomCount(room);
                 socket.to(room).emit("room-members-count", { count: Math.max(0, count - 1) });
             }
@@ -115,6 +150,7 @@ io.on("connection", function(socket){
     });
 
     socket.on("messageFromClient", function(data){
+        if (!data || !inRoom(socket, data.roomName)) return;
         // console.log(data)
         let textLength = 0;
         if (data.message && typeof data.message === "string") {
@@ -130,6 +166,7 @@ io.on("connection", function(socket){
 
     // Stateless Binary Relay Events
     socket.on("file-meta-relay", function(data){
+        if (!data || !inRoom(socket, data.roomName)) return;
         if (data.fileId && typeof data.size === "number") {
             activeFileSizes.set(data.fileId, data.size);
         }
@@ -145,6 +182,7 @@ io.on("connection", function(socket){
     });
 
     socket.on("file-chunk-relay", function(data){
+        if (!data || !inRoom(socket, data.roomName)) return;
         socket.to(data.roomName).emit("file-chunk-received", {
             fileId: data.fileId,
             index: data.index,
@@ -153,6 +191,7 @@ io.on("connection", function(socket){
     });
 
     socket.on("file-done-relay", function(data){
+        if (!data || !inRoom(socket, data.roomName)) return;
         let size = 0;
         if (data.fileId && activeFileSizes.has(data.fileId)) {
             size = activeFileSizes.get(data.fileId);
@@ -166,18 +205,21 @@ io.on("connection", function(socket){
     });
 
     socket.on("file-chunk-ack", function(data){
+        if (!data || !inRoom(socket, data.roomName)) return;
         socket.to(data.roomName).emit("file-chunk-ack-received", {
             fileId: data.fileId,
             index: data.index
         });
     });
     socket.on("file-resume-request", function(data){
+        if (!data || !inRoom(socket, data.roomName)) return;
         socket.to(data.roomName).emit("file-resume-request-received", {
             fileId: data.fileId
         });
     });
 
     socket.on("file-resume-response", function(data){
+        if (!data || !inRoom(socket, data.roomName)) return;
         socket.to(data.roomName).emit("file-resume-response-received", {
             fileId: data.fileId,
             nextIndex: data.nextIndex
@@ -189,13 +231,16 @@ io.on("connection", function(socket){
     });
 
     socket.on("iceCandidate", function(data){
+        if (!data || !inRoom(socket, data.room)) return;
         socket.to(data.room).emit("iceCandidateReceived", data)
     })
 
     socket.on("offer", function(data){
+        if (!data || !inRoom(socket, data.room)) return;
         socket.to(data.room).emit("offerSent", data)
     })
     socket.on("offerReceived", function(data){
+        if (!data || !inRoom(socket, data.room)) return;
         socket.to(data.room).emit("answerSent", data)
     })
 

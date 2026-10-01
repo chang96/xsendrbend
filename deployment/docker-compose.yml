@@ -7,9 +7,16 @@ services:
     container_name: faax-x
     ports:
       - "3009:3009"
+    environment:
+      - DATA_DIR=/usr/src/app/data
+    volumes:
+      - faax-data:/usr/src/app/data
     restart: unless-stopped
     networks:
       - mynetwork
+
+volumes:
+  faax-data:
 
 networks:
   mynetwork:
