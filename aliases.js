@@ -15,6 +15,7 @@ const RESERVED = new Set([
     "logout", "signin", "signup", "register", "account", "support", "terms", "privacy", "root",
     "system", "owner", "owners", "room", "rooms", "home", "index", "manifest", "robots", "favicon",
     "null", "undefined", "test", "status", "stats", "security", "legal", "contact",
+    "share", "share-target", "sw", "offline", "install", "download", "app-icon", "icons", "static",
 ]);
 
 const PAIR_TTL_MS = 5 * 60 * 1000;
