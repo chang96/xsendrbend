@@ -10,6 +10,7 @@ const fs = require("fs");
 const { DATA_DIR } = require("./db");
 const registerAliasHandlers = require("./aliases");
 const { aliasExists } = require("./aliases");
+const registerTaskHandlers = require("./tasks");
 app.use(cors());
 
 // stats.json now lives in the persistent data volume; migrate the old file once if present
@@ -103,6 +104,7 @@ const inRoom = (socket, roomName) => typeof roomName === "string" && socket.room
 
 io.on("connection", function(socket){
     registerAliasHandlers(io, socket, { emitRoomCount });
+    registerTaskHandlers(io, socket);
 
     socket.on("createRoom", function(data){
         if(data.room){

@@ -13,6 +13,12 @@ jobs:
       - name: deploy faax
         run: echo Deploying faax
       - name: run docker
-        run: sudo docker compose --project-name=faax -f ./deployment/docker-compose.yml up faax --build --force-recreate --remove-orphans -d
+        env:
+          TASKS_AI: ${{ vars.TASKS_AI }}
+          TASKS_AI_MODEL: ${{ vars.TASKS_AI_MODEL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: sudo -E docker compose --project-name=faax -f ./deployment/docker-compose.yml up faax --build --force-recreate --remove-orphans -d
       - name: prune images
         run: sudo docker image prune -a -f

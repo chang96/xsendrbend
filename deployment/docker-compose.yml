@@ -9,6 +9,12 @@ services:
       - "3009:3009"
     environment:
       - DATA_DIR=/usr/src/app/data
+      # Task organizer (values come from the deploy environment / GitHub secrets, never committed)
+      - TASKS_AI=${TASKS_AI:-claude}
+      - TASKS_AI_MODEL=${TASKS_AI_MODEL:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
     volumes:
       - faax-data:/usr/src/app/data
     restart: unless-stopped
