@@ -102,10 +102,11 @@ module.exports = function registerAliasHandlers(io, socket, { emitRoomCount }) {
 
     const ownerOf = () => socket.data.owner || null; // { alias, deviceId }
 
-    function joinAsOwner(alias, deviceId) {
+    function joinAsOwner(alias, deviceId, name) {
         socket.join(roomKey(alias));
         socket.join(ownersKey(alias));
         socket.data.owner = { alias, deviceId };
+        socket.data.name = name || "Owner device";
         const now = Date.now();
         stmts.touchDevice.run(now, deviceId);
         stmts.touchAlias.run(now, alias);
@@ -157,7 +158,7 @@ module.exports = function registerAliasHandlers(io, socket, { emitRoomCount }) {
         if (!dev || dev.alias !== alias || !safeEqualHex(dev.key_hash, sha256((data && data.key) || ""))) {
             return ack(cb, { ok: false, error: "not_owner" });
         }
-        joinAsOwner(alias, dev.device_id);
+        joinAsOwner(alias, dev.device_id, dev.name);
         ack(cb, { ok: true, alias, room: roomKey(alias), deviceId: dev.device_id });
     });
 
@@ -210,8 +211,10 @@ module.exports = function registerAliasHandlers(io, socket, { emitRoomCount }) {
 
         if (allow) {
             const pass = token(24);
-            guestPasses.set(pass, { alias: k.alias, expiresAt: Date.now() + GUEST_PASS_TTL_MS });
+            guestPasses.set(pass, { alias: k.alias, name: k.name, expiresAt: Date.now() + GUEST_PASS_TTL_MS });
             guest.join(roomKey(k.alias));
+            guest.data.guestOf = k.alias;
+            guest.data.name = k.name;
             guest.emit("alias:admitted", { alias: k.alias, room: roomKey(k.alias), guestPass: pass });
             emitRoomCount(roomKey(k.alias));
         } else {
@@ -226,6 +229,8 @@ module.exports = function registerAliasHandlers(io, socket, { emitRoomCount }) {
         const pass = guestPasses.get(String((data && data.guestPass) || ""));
         if (!pass || pass.alias !== alias || pass.expiresAt < Date.now()) return ack(cb, { ok: false, error: "expired" });
         socket.join(roomKey(alias));
+        socket.data.guestOf = alias;
+        socket.data.name = pass.name || "Guest";
         emitRoomCount(roomKey(alias));
         ack(cb, { ok: true, alias, room: roomKey(alias) });
     });
@@ -316,6 +321,7 @@ module.exports = function registerAliasHandlers(io, socket, { emitRoomCount }) {
                 s.leave(ownersKey(owner.alias));
                 s.leave(roomKey(owner.alias));
                 s.data.owner = null;
+                s.data.guestOf = null;
                 s.emit("alias:removed", { alias: owner.alias });
             }
         }
@@ -335,4 +341,6 @@ module.exports = function registerAliasHandlers(io, socket, { emitRoomCount }) {
 };
 
 module.exports.normalizeAlias = normalizeAlias;
+module.exports.roomKey = roomKey;
+module.exports.ownersKey = ownersKey;
 module.exports.aliasExists = (alias) => !!stmts.getAlias.get(normalizeAlias(alias));

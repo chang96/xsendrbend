@@ -2,7 +2,8 @@
 const express = require("express");
 const app = express();
 const http = require("http").Server(app);
-const io = require("socket.io")(http);
+// 4 MB frames: synced app records (code + a few versions) travel between owner devices
+const io = require("socket.io")(http, { maxHttpBufferSize: 4e6 });
 const PORT = process.env.PORT || 3009;
 const cors = require("cors");
 const path = require("path");
@@ -11,6 +12,7 @@ const { DATA_DIR } = require("./db");
 const registerAliasHandlers = require("./aliases");
 const { aliasExists } = require("./aliases");
 const registerTaskHandlers = require("./tasks");
+const registerAppHandlers = require("./apps");
 app.use(cors());
 
 // stats.json now lives in the persistent data volume; migrate the old file once if present
@@ -105,6 +107,7 @@ const inRoom = (socket, roomName) => typeof roomName === "string" && socket.room
 io.on("connection", function(socket){
     registerAliasHandlers(io, socket, { emitRoomCount });
     registerTaskHandlers(io, socket);
+    registerAppHandlers(io, socket);
 
     socket.on("createRoom", function(data){
         if(data.room){
