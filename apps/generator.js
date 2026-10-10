@@ -1,7 +1,7 @@
 // Turns a description into a small app that runs inside faax.
 // Provider: APPS_AI = claude (default) | openai | gemini; model: APPS_AI_MODEL.
 const PROVIDER = (process.env.APPS_AI || "claude").toLowerCase();
-const DEFAULT_MODELS = { claude: "claude-sonnet-5-5" };
+const DEFAULT_MODELS = { claude: "claude-opus-5-5" };
 const MODEL = process.env.APPS_AI_MODEL || DEFAULT_MODELS[PROVIDER];
 const TIMEOUT_MS = 9 * 60 * 1000;   // whole request (streamed builds can take a few minutes)
 const IDLE_MS = 120 * 1000;         // no bytes from the provider for this long -> give up
