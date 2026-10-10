@@ -152,7 +152,7 @@ module.exports = function registerAppHandlers(io, socket) {
         } catch (e) {
             if (e.code === "not_configured") return ack(cb, { ok: false, error: "not_configured" });
             console.error("apps:plan failed:", e.message);
-            ack(cb, { ok: false, error: "ai_error" });
+            ack(cb, { ok: false, error: e.code === "bad_output" ? "bad_output" : "ai_error", detail: e.detail || null });
         }
     });
 
@@ -166,7 +166,7 @@ module.exports = function registerAppHandlers(io, socket) {
             if (e.code === "not_configured") return ack(cb, { ok: false, error: "not_configured" });
             if (e.code === "bad_output") return ack(cb, { ok: false, error: "bad_output" });
             console.error("apps:build failed:", e.message);
-            ack(cb, { ok: false, error: "ai_error" });
+            ack(cb, { ok: false, error: "ai_error", detail: e.detail || null });
         }
     });
 };

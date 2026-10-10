@@ -3,7 +3,8 @@
 const PROVIDER = (process.env.APPS_AI || "claude").toLowerCase();
 const DEFAULT_MODELS = { claude: "claude-sonnet-5-5" };
 const MODEL = process.env.APPS_AI_MODEL || DEFAULT_MODELS[PROVIDER];
-const TIMEOUT_MS = 240000;
+const TIMEOUT_MS = 9 * 60 * 1000;   // whole request (streamed builds can take a few minutes)
+const IDLE_MS = 120 * 1000;         // no bytes from the provider for this long -> give up
 const MAX_HTML = 250 * 1024;
 const MAX_SECRETS = 100 * 1024;
 
@@ -118,13 +119,80 @@ function isConfigured() {
     return false;
 }
 
+// A failed AI call, with a short human-readable reason the owner can see (never includes keys)
+function aiError(detail, cause) {
+    const e = new Error(detail + (cause ? ` (${cause})` : ""));
+    e.code = "ai_error";
+    e.detail = String(detail).slice(0, 200);
+    return e;
+}
+function httpError(status, text) {
+    let msg = "";
+    try { const j = JSON.parse(text); msg = (j.error && (j.error.message || j.error.type)) || j.message || ""; } catch (e) { msg = String(text || "").slice(0, 160); }
+    const hint = status === 401 || status === 403 ? "API key rejected"
+        : status === 404 ? "model not found (check APPS_AI_MODEL)"
+        : status === 429 ? "AI rate limit or credit limit reached"
+        : status === 529 || status === 503 ? "AI service overloaded, try again shortly"
+        : status >= 500 ? "AI service error"
+        : "request rejected";
+    return aiError(`${PROVIDER} ${status}: ${hint}${msg ? " - " + msg.slice(0, 120) : ""}`);
+}
+
+// Claude with streaming (recommended for long outputs: keeps the connection busy, no idle drops)
+async function streamClaude(url, headers, body) {
+    const ctrl = new AbortController();
+    let idle = null;
+    const bump = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(new Error("idle")), IDLE_MS); };
+    const total = setTimeout(() => ctrl.abort(new Error("total")), TIMEOUT_MS);
+    bump();
+    try {
+        let res;
+        try {
+            res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify({ ...body, stream: true }), signal: ctrl.signal });
+        } catch (e) { throw aiError("could not reach the AI service", e.message); }
+        if (!res.ok) throw httpError(res.status, await res.text());
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "", stop = null;
+        const blocks = {}; // index -> { type, name, json }
+        const handle = (ev) => {
+            if (ev.type === "content_block_start") blocks[ev.index] = { type: ev.content_block.type, name: ev.content_block.name, json: "" };
+            else if (ev.type === "content_block_delta" && ev.delta && ev.delta.type === "input_json_delta" && blocks[ev.index]) blocks[ev.index].json += ev.delta.partial_json || "";
+            else if (ev.type === "message_delta" && ev.delta) stop = ev.delta.stop_reason || stop;
+            else if (ev.type === "error") throw aiError(`${PROVIDER} stream error: ${(ev.error && (ev.error.message || ev.error.type)) || "unknown"}`);
+        };
+        for (;;) {
+            let chunk;
+            try { chunk = await reader.read(); } catch (e) { throw aiError(ctrl.signal.aborted ? "the AI took too long to answer" : "connection to the AI dropped", e.message); }
+            if (chunk.done) break;
+            bump();
+            buf += dec.decode(chunk.value, { stream: true });
+            let i;
+            while ((i = buf.indexOf("\n\n")) >= 0) {
+                const raw = buf.slice(0, i); buf = buf.slice(i + 2);
+                const data = raw.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
+                if (data) { let ev; try { ev = JSON.parse(data); } catch (e) { continue; } handle(ev); }
+            }
+        }
+        if (stop === "max_tokens") { const e = new Error("too long"); e.code = "bad_output"; throw e; }
+        const tool = Object.values(blocks).find((b) => b.type === "tool_use");
+        if (!tool) throw aiError("the AI answered without using the tool");
+        try { return JSON.parse(tool.json || "{}"); } catch (e) { const x = new Error("bad json"); x.code = "bad_output"; throw x; }
+    } finally {
+        clearTimeout(idle); clearTimeout(total);
+    }
+}
+
 async function postJson(url, headers, body) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
     try {
-        const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body), signal: ctrl.signal });
+        let res;
+        try {
+            res = await fetch(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body), signal: ctrl.signal });
+        } catch (e) { throw aiError(ctrl.signal.aborted ? "the AI took too long to answer" : "could not reach the AI service", e.message); }
         const text = await res.text();
-        if (!res.ok) throw new Error(`${PROVIDER} HTTP ${res.status}: ${text.slice(0, 300)}`);
+        if (!res.ok) throw httpError(res.status, text);
         return JSON.parse(text);
     } finally {
         clearTimeout(timer);
@@ -135,15 +203,12 @@ async function postJson(url, headers, body) {
 async function structured({ system, user, tool, description, schema, maxTokens }) {
     if (PROVIDER === "claude") {
         const base = (process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com").replace(/\/+$/, "");
-        const data = await postJson(`${base}/v1/messages`, { "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" }, {
+        return streamClaude(`${base}/v1/messages`, { "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" }, {
             model: MODEL, max_tokens: maxTokens, system,
             tools: [{ name: tool, description, input_schema: schema }],
             tool_choice: { type: "tool", name: tool },
             messages: [{ role: "user", content: user }],
         });
-        const block = (data.content || []).find((b) => b.type === "tool_use");
-        if (!block) throw new Error("claude: no tool_use block");
-        return block.input;
     }
     const sys = system.replace(/through the \w+ tool/, "as JSON matching the schema");
     if (PROVIDER === "openai") {
@@ -222,7 +287,7 @@ async function build(data) {
         answers ? `Decisions the person made:\n${answers}` : "",
         baseBlock(data.base),
     ].filter(Boolean).join("\n\n");
-    const raw = await structured({ system: BUILD_PROMPT, user, tool: "save_app", description: "Save the finished app.", schema: APP_SCHEMA, maxTokens: 32000 });
+    const raw = await structured({ system: BUILD_PROMPT, user, tool: "save_app", description: "Save the finished app.", schema: APP_SCHEMA, maxTokens: 48000 });
 
     let html = String((raw && raw.html) || "").trim();
     if (!/<html[\s>]/i.test(html) || !/<\/html>/i.test(html)) throw badOutput("no complete html document");
