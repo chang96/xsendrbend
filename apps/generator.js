@@ -156,8 +156,11 @@ async function streamClaude(url, headers, body) {
         let buf = "", stop = null;
         const blocks = {}; // index -> { type, name, json }
         const handle = (ev) => {
-            if (ev.type === "content_block_start") blocks[ev.index] = { type: ev.content_block.type, name: ev.content_block.name, json: "" };
-            else if (ev.type === "content_block_delta" && ev.delta && ev.delta.type === "input_json_delta" && blocks[ev.index]) blocks[ev.index].json += ev.delta.partial_json || "";
+            if (ev.type === "content_block_start") blocks[ev.index] = { type: ev.content_block.type, json: "" };
+            else if (ev.type === "content_block_delta" && ev.delta && blocks[ev.index]) {
+                if (ev.delta.type === "input_json_delta") blocks[ev.index].json += ev.delta.partial_json || "";
+                else if (ev.delta.type === "text_delta") blocks[ev.index].json += ev.delta.text || "";
+            }
             else if (ev.type === "message_delta" && ev.delta) stop = ev.delta.stop_reason || stop;
             else if (ev.type === "error") throw aiError(`${PROVIDER} stream error: ${(ev.error && (ev.error.message || ev.error.type)) || "unknown"}`);
         };
@@ -175,9 +178,11 @@ async function streamClaude(url, headers, body) {
             }
         }
         if (stop === "max_tokens") { const e = new Error("too long"); e.code = "bad_output"; throw e; }
-        const tool = Object.values(blocks).find((b) => b.type === "tool_use");
-        if (!tool) throw aiError("the AI answered without using the tool");
-        try { return JSON.parse(tool.json || "{}"); } catch (e) { const x = new Error("bad json"); x.code = "bad_output"; throw x; }
+        if (stop === "refusal") throw aiError("the AI declined this request");
+        // Structured output arrives as text that matches the schema
+        const out = Object.values(blocks).filter((b) => b.type === "text" || b.type === "tool_use").map((b) => b.json).join("").trim();
+        if (!out) throw aiError("the AI returned nothing");
+        try { return JSON.parse(out); } catch (e) { const x = new Error("bad json"); x.code = "bad_output"; throw x; }
     } finally {
         clearTimeout(idle); clearTimeout(total);
     }
@@ -201,16 +206,16 @@ async function postJson(url, headers, body) {
 
 // One structured call: system + user text in, an object matching `schema` out
 async function structured({ system, user, tool, description, schema, maxTokens }) {
+    const sys = system.replace(/through the \w+ tool/, "as JSON matching the schema");
     if (PROVIDER === "claude") {
         const base = (process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com").replace(/\/+$/, "");
         return streamClaude(`${base}/v1/messages`, { "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" }, {
-            model: MODEL, max_tokens: maxTokens, system,
-            tools: [{ name: tool, description, input_schema: schema }],
-            tool_choice: { type: "tool", name: tool },
+            // Structured outputs (newer models reject forced tool_choice)
+            model: MODEL, max_tokens: maxTokens, system: sys,
+            output_config: { format: { type: "json_schema", schema } },
             messages: [{ role: "user", content: user }],
         });
     }
-    const sys = system.replace(/through the \w+ tool/, "as JSON matching the schema");
     if (PROVIDER === "openai") {
         const base = (process.env.OPENAI_BASE_URL || "https://api.openai.com").replace(/\/+$/, "");
         const data = await postJson(`${base}/v1/chat/completions`, { authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, {
