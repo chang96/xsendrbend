@@ -3,6 +3,8 @@
 const PROVIDER = (process.env.APPS_AI || "claude").toLowerCase();
 const DEFAULT_MODELS = { claude: "claude-opus-5-5" };
 const MODEL = process.env.APPS_AI_MODEL || DEFAULT_MODELS[PROVIDER];
+// Planning / the quick "how big is this?" check runs on a faster model (it only writes a few lines)
+const PLAN_MODEL = process.env.APPS_PLAN_MODEL || (PROVIDER === "claude" && !process.env.APPS_AI_MODEL ? "claude-sonnet-5-5" : MODEL);
 const TIMEOUT_MS = 15 * 60 * 1000;  // whole request (big apps on a large model can take ~10 minutes)
 const IDLE_MS = 120 * 1000;         // no bytes from the provider for this long -> give up
 const MAX_HTML = 350 * 1024;
@@ -56,13 +58,18 @@ LOOK AND FEEL
 - Mobile first: works from 320 px to 1200 px wide, fills the frame height (html, body { height: 100% }), no horizontal scrolling, touch targets at least 44 px, readable contrast.
 - Follow the style the person asked for; otherwise make something clean and modern with its own personality. Respect prefers-reduced-motion.
 - Keep the file as small as the app allows: most apps fit in 30 to 80 KB; content-heavy ones (a course, a big quiz bank) may go up to about 200 KB. Robust code: guard against missing data, never throw on an unknown message.
-- If the app needs something that normally lives on the internet or in a library (running SQL, a dictionary, a chess engine, a code checker), write a small built-in version that covers exactly what the app needs and nothing more. Example: an SQL course implements a tiny in-memory SQL engine for the statements it teaches and compares the learner's result rows with the expected rows, so typed answers are checked for real.`;
+- Only build what can really work inside this sandbox. When an idea depends on something outside it (a real service, live internet data, a real database, real AI, payments, accounts, files or the camera), either simulate it honestly in the page with a small built-in version that covers just what the app needs, or leave it out. Never pretend: the app should say plainly when something is a simulation.`;
 
 const PLAN_PROMPT = `You help someone describe a small app that will be built for them inside faax, a private room shared between their devices and the people they invite.
 
 ${SDK}
 
-Read their request and draft a plan. Then find the few things that are genuinely ambiguous and would change what gets built (rules, who controls what, what is remembered, scoring, what the owner sees). Ask about those only.
+Read their request and draft a plan. First judge its size and limits:
+- scope: "small" for a focused app (one or two screens, a game, a tracker, a calculator); "big" when it needs lots of content or screens, a simulated engine, or many features at once (a full course, a multi-part tool).
+- will_get: 3 to 6 short bullets, in plain words, of what the person will actually get.
+- limits: what it will NOT do or will only simulate inside the sandbox (no internet, no real services, no real AI, no files or camera; anything simulated must be named as simulated). Empty when there is nothing worth saying. Be concrete and honest, never alarming.
+- If the scope is big, the first will_get bullet may suggest a sensible first version, and the person can add the rest later with "Improve".
+Then find the few things that are genuinely ambiguous and would change what gets built (rules, who controls what, what is remembered, scoring, what the owner sees). Ask about those only.
 - summary: 2 to 3 plain sentences describing what you will build.
 - questions: 0 to 6 multiple-choice questions, each with 2 to 4 short options and the index of the option you recommend. No questions about colours or wording unless the person seems to care. If nothing is ambiguous, return no questions.
 Return the result only through the plan_app tool.`;
@@ -87,6 +94,9 @@ const PLAN_SCHEMA = {
     type: "object", additionalProperties: false,
     properties: {
         summary: { type: "string" },
+        scope: { type: "string", enum: ["small", "big"] },
+        will_get: { type: "array", items: { type: "string" } },
+        limits: { type: "array", items: { type: "string" } },
         questions: {
             type: "array",
             items: {
@@ -100,7 +110,7 @@ const PLAN_SCHEMA = {
             },
         },
     },
-    required: ["summary", "questions"],
+    required: ["summary", "scope", "will_get", "limits", "questions"],
 };
 
 const APP_SCHEMA = {
@@ -207,13 +217,13 @@ async function postJson(url, headers, body) {
 }
 
 // One structured call: system + user text in, an object matching `schema` out
-async function structured({ system, user, tool, description, schema, maxTokens, onText }) {
+async function structured({ system, user, tool, description, schema, maxTokens, onText, model = MODEL }) {
     const sys = system.replace(/through the \w+ tool/, "as JSON matching the schema");
     if (PROVIDER === "claude") {
         const base = (process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com").replace(/\/+$/, "");
         return streamClaude(`${base}/v1/messages`, { "x-api-key": process.env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01" }, {
             // Structured outputs (newer models reject forced tool_choice)
-            model: MODEL, max_tokens: maxTokens, system: sys,
+            model, max_tokens: maxTokens, system: sys,
             output_config: { format: { type: "json_schema", schema } },
             messages: [{ role: "user", content: user }],
         }, onText);
@@ -221,7 +231,7 @@ async function structured({ system, user, tool, description, schema, maxTokens, 
     if (PROVIDER === "openai") {
         const base = (process.env.OPENAI_BASE_URL || "https://api.openai.com").replace(/\/+$/, "");
         const data = await postJson(`${base}/v1/chat/completions`, { authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, {
-            model: MODEL, max_completion_tokens: maxTokens,
+            model, max_completion_tokens: maxTokens,
             messages: [{ role: "system", content: sys }, { role: "user", content: user }],
             response_format: { type: "json_schema", json_schema: { name: tool, strict: true, schema } },
         });
@@ -235,7 +245,7 @@ async function structured({ system, user, tool, description, schema, maxTokens, 
             return out;
         };
         const base = (process.env.GEMINI_BASE_URL || "https://generativelanguage.googleapis.com").replace(/\/+$/, "");
-        const data = await postJson(`${base}/v1beta/models/${encodeURIComponent(MODEL)}:generateContent`, { "x-goog-api-key": process.env.GEMINI_API_KEY }, {
+        const data = await postJson(`${base}/v1beta/models/${encodeURIComponent(model)}:generateContent`, { "x-goog-api-key": process.env.GEMINI_API_KEY }, {
             systemInstruction: { parts: [{ text: sys }] },
             contents: [{ role: "user", parts: [{ text: user }] }],
             generationConfig: { maxOutputTokens: maxTokens, responseMimeType: "application/json", responseSchema: toGemini(schema) },
@@ -268,13 +278,18 @@ async function plan(data) {
     if (!isConfigured()) throw notConfigured();
     const who = whoOf(data.who);
     const user = `Who uses it: ${WHO[who]}\n\nRequest:\n${clip(data.prompt, 4000)}${data.base ? `\n\nThis is a change to an existing app.${baseBlock(data.base)}` : ""}`;
-    const raw = await structured({ system: PLAN_PROMPT, user, tool: "plan_app", description: "Save the plan and questions.", schema: PLAN_SCHEMA, maxTokens: 2000 });
+    const raw = await structured({ system: PLAN_PROMPT, user, tool: "plan_app", description: "Save the plan and questions.", schema: PLAN_SCHEMA, maxTokens: 3000, model: PLAN_MODEL });
     const questions = (Array.isArray(raw && raw.questions) ? raw.questions : []).slice(0, 6).map((q) => {
         const options = (Array.isArray(q.options) ? q.options : []).map((o) => clip(o, 80)).filter(Boolean).slice(0, 4);
         const rec = Number.isInteger(q.recommended) && q.recommended >= 0 && q.recommended < options.length ? q.recommended : 0;
         return { question: clip(q.question, 200), options, recommended: rec };
     }).filter((q) => q.question && q.options.length >= 2);
-    return { summary: clip(raw && raw.summary, 600), questions };
+    const list = (x, n) => (Array.isArray(x) ? x : []).map((t) => clip(t, 160).trim()).filter(Boolean).slice(0, n);
+    return {
+        summary: clip(raw && raw.summary, 600), questions,
+        scope: raw && raw.scope === "big" ? "big" : "small",
+        will_get: list(raw && raw.will_get, 6), limits: list(raw && raw.limits, 5),
+    };
 }
 
 const HEX = /^#[0-9a-fA-F]{6}$/;

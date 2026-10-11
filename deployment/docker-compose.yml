@@ -12,9 +12,10 @@ services:
       # Task organizer (values come from the deploy environment / GitHub secrets, never committed)
       - TASKS_AI=${TASKS_AI:-claude}
       - TASKS_AI_MODEL=${TASKS_AI_MODEL:-}
-      # App generator (defaults: claude / claude-opus-5-5)
+      # App generator (defaults: claude / claude-opus-5-5 for building, claude-sonnet-5-5 for planning; override with APPS_AI_MODEL / APPS_PLAN_MODEL)
       - APPS_AI=${APPS_AI:-claude}
       - APPS_AI_MODEL=${APPS_AI_MODEL:-}
+      - APPS_PLAN_MODEL=${APPS_PLAN_MODEL:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
