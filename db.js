@@ -30,9 +30,16 @@ db.exec(`
     );
 
     CREATE INDEX IF NOT EXISTS idx_owner_devices_alias ON owner_devices(alias);
+
 `);
 
+// Access codes are never stored: an owner device signs them with its own key and the server checks the
+// signature against that device's key hash. The only thing kept is a per-alias "revoke everything before" time.
+try { db.exec("ALTER TABLE aliases ADD COLUMN invites_revoked_at INTEGER"); } catch (e) { /* already there */ }
+
 const stmts = {
+    revokeInvites: db.prepare("UPDATE aliases SET invites_revoked_at = ? WHERE alias = ?"),
+    devicesForInvite: db.prepare("SELECT device_id, key_hash FROM owner_devices WHERE alias = ?"),
     getAlias: db.prepare("SELECT * FROM aliases WHERE alias = ?"),
     insertAlias: db.prepare("INSERT INTO aliases (alias, recovery_hash, created_at, last_active_at) VALUES (?, ?, ?, ?)"),
     touchAlias: db.prepare("UPDATE aliases SET last_active_at = ? WHERE alias = ?"),

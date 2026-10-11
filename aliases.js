@@ -94,6 +94,50 @@ function newRecoveryCode() {
     return randomCode(20).match(/.{5}/g).join("-");
 }
 
+// ---------- access codes ----------
+// 16 characters (CODE_ALPHABET, 5 bits each) = 10 bytes:
+//   [0..2] expiry, minutes since 2026-01-01 UTC   [3] validity (2 bits: 1/7/30 days) + 6 random bits
+//   [4]    first byte of sha256(deviceId) of the owner device that made it
+//   [5..9] first 5 bytes of HMAC-SHA256(key = that device's key hash (hex text), "faax-invite|<alias>|<hex of bytes 0..4>")
+// The owner device knows its key, so it can compute the key hash; the server only ever had the hash.
+const INVITE_EPOCH = Date.UTC(2026, 0, 1);
+const INVITE_DAYS = [1, 7, 30, 30];
+
+function decodeCode(code) {
+    const s = normalizeCode(code);
+    if (s.length !== 16) return null;
+    let bits = 0, val = 0;
+    const out = [];
+    for (const ch of s) {
+        const i = CODE_ALPHABET.indexOf(ch);
+        if (i < 0) return null;
+        val = (val << 5) | i; bits += 5;
+        if (bits >= 8) { out.push((val >> (bits - 8)) & 0xff); bits -= 8; }
+    }
+    return Buffer.from(out.slice(0, 10));
+}
+
+function verifyInvite(alias, code) {
+    const b = decodeCode(code);
+    if (!b) return { ok: false, error: "invalid_code" };
+    const row = stmts.getAlias.get(alias);
+    if (!row) return { ok: false, error: "invalid_code" };
+    const payload = b.subarray(0, 5);
+    const devices = stmts.devicesForInvite.all(alias).filter((d) => crypto.createHash("sha256").update(d.device_id).digest()[0] === b[4]);
+    const msg = `faax-invite|${alias}|${payload.toString("hex")}`;
+    const signer = devices.find((d) => {
+        const mac = crypto.createHmac("sha256", Buffer.from(d.key_hash, "utf8")).update(msg).digest().subarray(0, 5);
+        return crypto.timingSafeEqual(mac, b.subarray(5, 10));
+    });
+    if (!signer) return { ok: false, error: "invalid_code" };  // forged, or the device that made it was removed
+    const expiresAt = INVITE_EPOCH + ((b[0] << 16) | (b[1] << 8) | b[2]) * 60000;
+    if (expiresAt <= Date.now()) return { ok: false, error: "expired_code" };
+    // codes carry minutes: anything issued in or before the minute of a "cancel all" is dead
+    const issuedMin = Math.floor((expiresAt - INVITE_DAYS[b[3] >> 6] * 86400000 - INVITE_EPOCH) / 60000);
+    if (row.invites_revoked_at && issuedMin <= Math.floor((row.invites_revoked_at - INVITE_EPOCH) / 60000)) return { ok: false, error: "invalid_code" };
+    return { ok: true, expiresAt };
+}
+
 // ---------- registration ----------
 module.exports = function registerAliasHandlers(io, socket, { emitRoomCount }) {
     const ip = clientIp(socket);
@@ -115,6 +159,17 @@ module.exports = function registerAliasHandlers(io, socket, { emitRoomCount }) {
         for (const [requestId, k] of knocks) {
             if (k.alias === alias) socket.emit("alias:knock", { requestId, name: k.name, at: k.at });
         }
+    }
+
+    // Put a guest socket in the room with a fresh guest pass (survives refresh / reconnect for 12h)
+    function admitGuest(guest, alias, name) {
+        const pass = token(24);
+        guestPasses.set(pass, { alias, name, expiresAt: Date.now() + GUEST_PASS_TTL_MS });
+        guest.join(roomKey(alias));
+        guest.data.guestOf = alias;
+        guest.data.name = name;
+        emitRoomCount(roomKey(alias));
+        return pass;
     }
 
     function notifyDevicesChanged(alias) {
@@ -194,6 +249,31 @@ module.exports = function registerAliasHandlers(io, socket, { emitRoomCount }) {
         }
     });
 
+    // ---- access codes: made and signed on an owner device; nothing about them is stored here ----
+    socket.on("alias:invites-revoke", (data, cb) => {
+        const owner = ownerOf();
+        if (!owner) return ack(cb, { ok: false, error: "not_owner" });
+        const now = Date.now();
+        stmts.revokeInvites.run(now, owner.alias);
+        ack(cb, { ok: true, newCodesFrom: Math.floor(now / 60000) * 60000 + 60000 }); // next minute
+    });
+
+    // Guest with a code: no knock, no waiting for an owner to be online
+    socket.on("alias:enter-code", (data, cb) => {
+        // only WRONG codes count towards the limit, so a whole party on one Wi-Fi can still walk in
+        const failKey = `code-fail:${ip}`;
+        const fails = buckets.get(failKey);
+        if (fails && fails.resetAt > Date.now() && fails.count >= 20) return ack(cb, { ok: false, error: "rate_limited" });
+        if (limited("enter-code", 300, 10 * 60 * 1000)) return ack(cb, { ok: false, error: "rate_limited" });
+        const alias = normalizeAlias(data && data.alias);
+        const inv = verifyInvite(alias, data && data.code);
+        if (!inv.ok) { rateLimit(failKey, 20, 10 * 60 * 1000); return ack(cb, { ok: false, error: inv.error }); }
+        const name = cleanName(data && data.name);
+        const pass = admitGuest(socket, alias, name);
+        io.to(ownersKey(alias)).emit("alias:guest-joined", { alias, name, via: "code" });
+        ack(cb, { ok: true, alias, room: roomKey(alias), guestPass: pass, expiresAt: inv.expiresAt });
+    });
+
     // Owner lets a guest in (or not)
     socket.on("alias:decide", (data, cb) => {
         const owner = ownerOf();
@@ -210,13 +290,8 @@ module.exports = function registerAliasHandlers(io, socket, { emitRoomCount }) {
         if (!guest) return ack(cb, { ok: false, error: "guest_gone" });
 
         if (allow) {
-            const pass = token(24);
-            guestPasses.set(pass, { alias: k.alias, name: k.name, expiresAt: Date.now() + GUEST_PASS_TTL_MS });
-            guest.join(roomKey(k.alias));
-            guest.data.guestOf = k.alias;
-            guest.data.name = k.name;
+            const pass = admitGuest(guest, k.alias, k.name);
             guest.emit("alias:admitted", { alias: k.alias, room: roomKey(k.alias), guestPass: pass });
-            emitRoomCount(roomKey(k.alias));
         } else {
             guest.emit("alias:denied", { alias: k.alias });
         }
