@@ -3,9 +3,9 @@
 const PROVIDER = (process.env.APPS_AI || "claude").toLowerCase();
 const DEFAULT_MODELS = { claude: "claude-opus-5-5" };
 const MODEL = process.env.APPS_AI_MODEL || DEFAULT_MODELS[PROVIDER];
-const TIMEOUT_MS = 9 * 60 * 1000;   // whole request (streamed builds can take a few minutes)
+const TIMEOUT_MS = 15 * 60 * 1000;  // whole request (big apps on a large model can take ~10 minutes)
 const IDLE_MS = 120 * 1000;         // no bytes from the provider for this long -> give up
-const MAX_HTML = 250 * 1024;
+const MAX_HTML = 350 * 1024;
 const MAX_SECRETS = 100 * 1024;
 
 const WHO = {
@@ -55,7 +55,8 @@ THE OWNER VIEW (always required)
 LOOK AND FEEL
 - Mobile first: works from 320 px to 1200 px wide, fills the frame height (html, body { height: 100% }), no horizontal scrolling, touch targets at least 44 px, readable contrast.
 - Follow the style the person asked for; otherwise make something clean and modern with its own personality. Respect prefers-reduced-motion.
-- Keep the whole file under about 60 KB. Robust code: guard against missing data, never throw on an unknown message.`;
+- Keep the file as small as the app allows: most apps fit in 30 to 80 KB; content-heavy ones (a course, a big quiz bank) may go up to about 200 KB. Robust code: guard against missing data, never throw on an unknown message.
+- If the app needs something that normally lives on the internet or in a library (running SQL, a dictionary, a chess engine, a code checker), write a small built-in version that covers exactly what the app needs and nothing more. Example: an SQL course implements a tiny in-memory SQL engine for the statements it teaches and compares the learner's result rows with the expected rows, so typed answers are checked for real.`;
 
 const PLAN_PROMPT = `You help someone describe a small app that will be built for them inside faax, a private room shared between their devices and the people they invite.
 
@@ -139,7 +140,7 @@ function httpError(status, text) {
 }
 
 // Claude with streaming (recommended for long outputs: keeps the connection busy, no idle drops)
-async function streamClaude(url, headers, body) {
+async function streamClaude(url, headers, body, onText) {
     const ctrl = new AbortController();
     let idle = null;
     const bump = () => { clearTimeout(idle); idle = setTimeout(() => ctrl.abort(new Error("idle")), IDLE_MS); };
@@ -160,6 +161,7 @@ async function streamClaude(url, headers, body) {
             else if (ev.type === "content_block_delta" && ev.delta && blocks[ev.index]) {
                 if (ev.delta.type === "input_json_delta") blocks[ev.index].json += ev.delta.partial_json || "";
                 else if (ev.delta.type === "text_delta") blocks[ev.index].json += ev.delta.text || "";
+                if (onText) onText(blocks[ev.index].json);
             }
             else if (ev.type === "message_delta" && ev.delta) stop = ev.delta.stop_reason || stop;
             else if (ev.type === "error") throw aiError(`${PROVIDER} stream error: ${(ev.error && (ev.error.message || ev.error.type)) || "unknown"}`);
@@ -177,12 +179,12 @@ async function streamClaude(url, headers, body) {
                 if (data) { let ev; try { ev = JSON.parse(data); } catch (e) { continue; } handle(ev); }
             }
         }
-        if (stop === "max_tokens") { const e = new Error("too long"); e.code = "bad_output"; throw e; }
+        if (stop === "max_tokens") { const e = new Error("too long"); e.code = "bad_output"; e.detail = "The app got too long and was cut off. Ask for fewer features, or build it in steps."; throw e; }
         if (stop === "refusal") throw aiError("the AI declined this request");
         // Structured output arrives as text that matches the schema
         const out = Object.values(blocks).filter((b) => b.type === "text" || b.type === "tool_use").map((b) => b.json).join("").trim();
         if (!out) throw aiError("the AI returned nothing");
-        try { return JSON.parse(out); } catch (e) { const x = new Error("bad json"); x.code = "bad_output"; throw x; }
+        try { return JSON.parse(out); } catch (e) { const x = new Error("bad json"); x.code = "bad_output"; x.detail = "The answer came back garbled. Try again."; throw x; }
     } finally {
         clearTimeout(idle); clearTimeout(total);
     }
@@ -205,7 +207,7 @@ async function postJson(url, headers, body) {
 }
 
 // One structured call: system + user text in, an object matching `schema` out
-async function structured({ system, user, tool, description, schema, maxTokens }) {
+async function structured({ system, user, tool, description, schema, maxTokens, onText }) {
     const sys = system.replace(/through the \w+ tool/, "as JSON matching the schema");
     if (PROVIDER === "claude") {
         const base = (process.env.ANTHROPIC_BASE_URL || "https://api.anthropic.com").replace(/\/+$/, "");
@@ -214,7 +216,7 @@ async function structured({ system, user, tool, description, schema, maxTokens }
             model: MODEL, max_tokens: maxTokens, system: sys,
             output_config: { format: { type: "json_schema", schema } },
             messages: [{ role: "user", content: user }],
-        });
+        }, onText);
     }
     if (PROVIDER === "openai") {
         const base = (process.env.OPENAI_BASE_URL || "https://api.openai.com").replace(/\/+$/, "");
@@ -276,13 +278,47 @@ async function plan(data) {
 }
 
 const HEX = /^#[0-9a-fA-F]{6}$/;
-function badOutput(msg) {
+function badOutput(msg, detail) {
     const e = new Error(msg);
     e.code = "bad_output";
+    e.detail = detail || null;
     return e;
 }
 
-async function build(data) {
+// Live progress from the half-written answer: the fields stream in schema order
+// (name, glyph, bg, fg, summary, spec, note, html, secrets_json), so we can say what is really happening.
+const field = (txt, key) => {
+    const m = txt.match(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)("?)`));
+    if (!m) return null;
+    let v = m[1];
+    try { v = JSON.parse(`"${v.replace(/\\$/, "")}"`); } catch (e) { v = v.replace(/\\n/g, "\n"); }
+    return { value: v, done: m[2] === '"' };
+};
+function progressFrom(txt) {
+    const html = field(txt, "html");
+    if (html) {
+        const kb = Math.round(Buffer.byteLength(html.value) / 1024);
+        return { phase: "html", text: html.done ? "Finishing up" : `Writing the app · ${kb} KB`, kb };
+    }
+    const spec = field(txt, "spec");
+    if (spec) {
+        const lines = spec.value.split("\n").map((l) => l.replace(/^[#\-*\s\d.]+/, "").trim()).filter(Boolean);
+        const last = spec.done ? lines[lines.length - 1] : lines[lines.length - 2] || lines[lines.length - 1];
+        return { phase: "spec", text: last ? `Planning: ${last}` : "Planning the features" };
+    }
+    const summary = field(txt, "summary");
+    if (summary && summary.done) return { phase: "summary", text: summary.value };
+    const name = field(txt, "name");
+    if (name && name.done) return { phase: "name", text: `Calling it “${name.value}”` };
+    return { phase: "start", text: "Reading your idea" };
+}
+
+function throttled(fn, ms) {
+    let last = 0;
+    return (x) => { const now = Date.now(); if (now - last >= ms) { last = now; fn(x); } };
+}
+
+async function build(data, onProgress) {
     if (!isConfigured()) throw notConfigured();
     const who = whoOf(data.who);
     const answers = describeAnswers(data.answers);
@@ -292,11 +328,12 @@ async function build(data) {
         answers ? `Decisions the person made:\n${answers}` : "",
         baseBlock(data.base),
     ].filter(Boolean).join("\n\n");
-    const raw = await structured({ system: BUILD_PROMPT, user, tool: "save_app", description: "Save the finished app.", schema: APP_SCHEMA, maxTokens: 48000 });
+    const raw = await structured({ system: BUILD_PROMPT, user, tool: "save_app", description: "Save the finished app.", schema: APP_SCHEMA, maxTokens: 64000,
+        onText: onProgress ? throttled((txt) => onProgress(progressFrom(txt)), 800) : null });
 
     let html = String((raw && raw.html) || "").trim();
-    if (!/<html[\s>]/i.test(html) || !/<\/html>/i.test(html)) throw badOutput("no complete html document");
-    if (Buffer.byteLength(html) > MAX_HTML) throw badOutput("html too large");
+    if (!/<html[\s>]/i.test(html) || !/<\/html>/i.test(html)) throw badOutput("no complete html document", "The app came back unfinished (no complete page). Try again; if it keeps happening, ask for fewer features.");
+    if (Buffer.byteLength(html) > MAX_HTML) throw badOutput("html too large", "The app came out bigger than 350 KB. Ask for fewer features, or build it in steps.");
     let secrets = null;
     try {
         const raw2 = String((raw && raw.secrets_json) || "").trim();
@@ -321,4 +358,4 @@ async function build(data) {
     };
 }
 
-module.exports = { plan, build, isConfigured, PROVIDER, MODEL, SDK };
+module.exports = { plan, build, isConfigured, progressFrom, PROVIDER, MODEL, SDK };

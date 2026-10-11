@@ -12,6 +12,12 @@ const MAX_RECORD_BYTES = 3 * 1024 * 1024; // one synced app record (incl. up to 
 const MSGS_PER_SECOND = 40;
 
 const buckets = new Map();
+const jobs = new Map(); // jobId -> { alias, state: running|done|error, meta, progress, app?, error?, at }
+const JOB_TTL_MS = 30 * 60 * 1000;
+setInterval(() => {
+    const now = Date.now();
+    for (const [k, j] of jobs) if (j.state !== "running" && now - j.at > JOB_TTL_MS) jobs.delete(k);
+}, 60 * 1000).unref();
 function allow(key, max, windowMs) {
     const now = Date.now();
     const b = buckets.get(key);
@@ -156,17 +162,51 @@ module.exports = function registerAppHandlers(io, socket) {
         }
     });
 
-    socket.on("apps:build", async (data, cb) => {
+    // Builds run detached from the socket that asked: progress and the result go to ALL of the
+    // owner's devices (apps:job), and are kept in memory for a while so a device that lost its
+    // connection mid-build can pick the result up after reconnecting (apps:jobs).
+    socket.on("apps:build", (data, cb) => {
         const s = seat();
         if (!isOwner(s)) return ack(cb, { ok: false, error: "not_owner" });
+        const jobId = str(data && data.jobId, 64);
+        if (!jobId) return ack(cb, { ok: false, error: "bad_request" });
+        if (!isConfigured()) return ack(cb, { ok: false, error: "not_configured" });
+        const running = [...jobs.values()].filter((j) => j.alias === s.alias && j.state === "running").length;
+        if (running >= 3) return ack(cb, { ok: false, error: "busy" });
         if (!allow(`build:${s.alias}`, 20, 60 * 60 * 1000)) return ack(cb, { ok: false, error: "rate_limited" });
-        try {
-            ack(cb, { ok: true, app: await build(data || {}) });
-        } catch (e) {
-            if (e.code === "not_configured") return ack(cb, { ok: false, error: "not_configured" });
-            if (e.code === "bad_output") return ack(cb, { ok: false, error: "bad_output" });
-            console.error("apps:build failed:", e.message);
-            ack(cb, { ok: false, error: "ai_error", detail: e.detail || null });
-        }
+
+        const job = {
+            jobId, alias: s.alias, state: "running", startedAt: Date.now(), at: Date.now(),
+            meta: { kind: data.base ? "change" : "new", appId: str(data.appId, 64), label: str(data.prompt, 120) },
+            progress: { phase: "start", text: "Reading your idea" },
+        };
+        jobs.set(jobId, job);
+        const toOwners = (payload) => io.to(ownersKey(s.alias)).emit("apps:job", { jobId, ...job.meta, ...payload });
+        ack(cb, { ok: true, jobId });
+        toOwners({ state: "running", progress: job.progress, startedAt: job.startedAt });
+
+        build(data || {}, (progress) => {
+            job.progress = progress;
+            toOwners({ state: "running", progress, startedAt: job.startedAt });
+        }).then((app) => {
+            Object.assign(job, { state: "done", app, at: Date.now() });
+            toOwners({ state: "done", app });
+        }).catch((e) => {
+            const error = e.code === "not_configured" || e.code === "bad_output" ? e.code : "ai_error";
+            console.error("apps:build failed:", e.code || "", e.message, e.detail || "");
+            Object.assign(job, { state: "error", error, detail: e.detail || null, at: Date.now() });
+            toOwners({ state: "error", error, detail: e.detail || null });
+        });
+    });
+
+    // A device (re)connected: what happened to the builds it's waiting for?
+    socket.on("apps:jobs", (data, cb) => {
+        const s = seat();
+        if (!isOwner(s)) return ack(cb, { ok: false, error: "not_owner" });
+        const list = [...jobs.values()].filter((j) => j.alias === s.alias).map((j) => ({
+            jobId: j.jobId, ...j.meta, state: j.state, progress: j.progress, startedAt: j.startedAt,
+            app: j.state === "done" ? j.app : undefined, error: j.error, detail: j.detail,
+        }));
+        ack(cb, { ok: true, jobs: list });
     });
 };
