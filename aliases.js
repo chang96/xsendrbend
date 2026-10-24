@@ -7,6 +7,7 @@
 // - Claims never expire: lose every device + the recovery code and the name stays taken.
 const crypto = require("crypto");
 const { stmts, claimAlias } = require("./db");
+const push = require("./push");
 
 const ALIAS_RE = /^[a-z0-9](?:[a-z0-9-]{1,18})[a-z0-9]$/; // 3-20 chars, no leading/trailing dash
 const RESERVED = new Set([
@@ -235,6 +236,8 @@ module.exports = function registerAliasHandlers(io, socket, { emitRoomCount }) {
         const knock = { alias, socketId: socket.id, name: cleanName(data && data.name), at: Date.now() };
         knocks.set(requestId, knock);
         io.to(ownersKey(alias)).emit("alias:knock", { requestId, name: knock.name, at: knock.at });
+        // owner devices that aren't in the room right now get a notification
+        push.notifyOwners(io, alias, { title: `${knock.name} wants to join`, body: `Open faax.me/${alias} to let them in.`, tag: "knock", url: `/${alias}` }, { ttl: 600 }).catch(() => {});
 
         const owners = io.sockets.adapter.rooms.get(ownersKey(alias));
         ack(cb, { ok: true, requestId, ownersOnline: owners ? owners.size : 0 });
@@ -388,6 +391,7 @@ module.exports = function registerAliasHandlers(io, socket, { emitRoomCount }) {
         const deviceId = String((data && data.deviceId) || "");
         if (stmts.countDevices.get(owner.alias).n <= 1) return ack(cb, { ok: false, error: "last_device" });
         const res = stmts.deleteDevice.run(deviceId, owner.alias);
+        push.removeDeviceSubs(deviceId);
         if (res.changes === 0) return ack(cb, { ok: false, error: "not_found" });
 
         // Kick that device's live sockets out of owner state

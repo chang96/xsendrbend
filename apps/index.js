@@ -5,6 +5,7 @@
 //  - calls the AI to plan / build / improve apps (owners only, rate limited)
 const { roomKey, ownersKey } = require("../aliases");
 const { plan, build, isConfigured } = require("./generator");
+const { notifyOwners } = require("../push");
 
 const MAX_MSG_BYTES = 64 * 1024;          // one app message
 const MAX_BUNDLE_BYTES = 600 * 1024;      // one shared app (html + meta)
@@ -191,6 +192,7 @@ module.exports = function registerAppHandlers(io, socket) {
         }).then((app) => {
             Object.assign(job, { state: "done", app, at: Date.now() });
             toOwners({ state: "done", app });
+            notifyOwners(io, s.alias, { title: `✦ ${app.name} is ready`, body: job.meta.kind === "change" ? "The new version is in. Tap to open it." : "Tap to open it.", tag: "build-" + jobId, url: `/${s.alias}?view=apps` }).catch(() => {});
         }).catch((e) => {
             const error = e.code === "not_configured" || e.code === "bad_output" ? e.code : "ai_error";
             console.error("apps:build failed:", e.code || "", e.message, e.detail || "");
