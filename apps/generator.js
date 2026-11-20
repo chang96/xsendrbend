@@ -58,6 +58,7 @@ LOOK AND FEEL
 - Mobile first: works from 320 px to 1200 px wide, fills the frame height (html, body { height: 100% }), no horizontal scrolling, touch targets at least 44 px, readable contrast.
 - Follow the style the person asked for; otherwise make something clean and modern with its own personality. Respect prefers-reduced-motion.
 - Keep the file as small as the app allows: most apps fit in 30 to 80 KB; content-heavy ones (a course, a big quiz bank) may go up to about 200 KB. Robust code: guard against missing data, never throw on an unknown message.
+- Content vs saved data: content (lessons, questions, levels, word lists, default settings) lives in the code. faax.store keeps only what people create or achieve (progress, scores, answers, their own entries), keyed by stable content ids. On start, load the saved data and merge it into the content from the code, so a new version's new content always shows and old progress still applies. Never save a copy of the content itself in faax.store. ctx.app.version is the version number of the running app if you need to migrate saved data.
 - Only build what can really work inside this sandbox. When an idea depends on something outside it (a real service, live internet data, a real database, real AI, payments, accounts, files or the camera), either simulate it honestly in the page with a small built-in version that covers just what the app needs, or leave it out. Never pretend: the app should say plainly when something is a simulation.`;
 
 const PLAN_PROMPT = `You help someone describe a small app that will be built for them inside faax, a private room shared between their devices and the people they invite.
@@ -86,9 +87,39 @@ Write ONE complete HTML document (<!doctype html> ... </html>) for the request. 
 - spec: the app's specification in short markdown (features, rules, roles, what the owner view shows, what faax.store keys hold). It is used for future edits.
 - note: what this version changed, max 60 characters ("First version" for a new app).
 - secrets_json: a JSON object as a string with everything members must never see (e.g. {"answers":[2,0,3]}), or "{}" if there is nothing secret. Max 100 KB.
-When you are given an existing app and a change request, return the WHOLE updated HTML and the whole updated secrets_json, keep everything that was not asked to change, and keep faax.store data compatible (or migrate old keys in code).
+When you are given an existing app and a change request, return the WHOLE updated HTML and the whole updated secrets_json, keep everything that was not asked to change, and keep faax.store data compatible (or migrate old keys in code). If old versions saved content into faax.store, stop relying on it: content comes from the code, saved data only adds progress.
 When the change request reports an error, find the cause and fix it.
 Return the result only through the save_app tool.`;
+
+const EDIT_PROMPT = `You improve a small app that runs inside faax, a private room shared between a person's devices and the people they invite.
+
+${SDK}
+
+You get the app's spec, its secrets_json, its current HTML and a change request. Return EDITS to the HTML, not a rewrite:
+- edits: a list of {find, replace}. "find" is an exact snippet copied from the current HTML, character for character (spaces and line breaks included), long enough to occur exactly once: usually 1 to 6 whole lines. "replace" is what goes in its place ("" deletes it). To add code, find a nearby anchor and repeat it in "replace" with the new code before or after it. Edits apply in order, each to the HTML as left by the previous one.
+- Keep edits as small as the change allows and never repeat unchanged code. Change everything the request needs, though: if it asks for more lessons, write the new lessons in full.
+- Only if the change really rewrites most of the file: return edits [] and the whole new document (<!doctype html> ... </html>) in full_html. Otherwise full_html is "".
+- changes: 1 to 6 short bullets, in plain words, of what the person will notice (e.g. "Added lessons 6 to 10 on joins"). If the request is vague ("improve it", "make it better"), choose 2 or 3 concrete, valuable improvements that fit this app, make them, and list them here.
+- note: what this version changed, max 60 characters.
+- name, glyph, bg, fg, summary: keep them unless the request changes them.
+- spec: the whole updated spec (short markdown).
+- secrets_json: the whole updated secrets object as a string ("{}" if none).
+- If old versions saved content (lessons, questions...) into faax.store, also fix that: content comes from the code, saved data only adds progress, so the new content shows.
+When the change request reports an error, find the cause and fix it.
+Return the result only through the edit_app tool.`;
+
+const EDIT_SCHEMA = {
+    type: "object", additionalProperties: false,
+    properties: {
+        name: { type: "string" }, glyph: { type: "string" }, bg: { type: "string" }, fg: { type: "string" },
+        summary: { type: "string" }, note: { type: "string" },
+        changes: { type: "array", items: { type: "string" } },
+        edits: { type: "array", items: { type: "object", additionalProperties: false, properties: { find: { type: "string" }, replace: { type: "string" } }, required: ["find", "replace"] } },
+        full_html: { type: "string" },
+        spec: { type: "string" }, secrets_json: { type: "string" },
+    },
+    required: ["name", "glyph", "bg", "fg", "summary", "note", "changes", "edits", "full_html", "spec", "secrets_json"],
+};
 
 const PLAN_SCHEMA = {
     type: "object", additionalProperties: false,
@@ -328,6 +359,44 @@ function progressFrom(txt) {
     return { phase: "start", text: "Reading your idea" };
 }
 
+function progressEdit(txt) {
+    if (field(txt, "spec")) return { phase: "html", text: "Finishing up" };
+    const full = field(txt, "full_html");
+    if (full && full.value) return { phase: "html", text: `Rewriting the app · ${Math.round(Buffer.byteLength(full.value) / 1024)} KB` };
+    const ei = txt.indexOf('"edits"');
+    if (ei >= 0) {
+        const n = (txt.slice(ei).match(/"find"\s*:/g) || []).length;
+        if (n) return { phase: "html", text: `Making change ${n}` };
+    }
+    const ci = txt.indexOf('"changes"');
+    if (ci >= 0) {
+        const items = (txt.slice(ci).match(/"((?:[^"\\]|\\.)*)"\s*[,\]]/g) || []).map((m) => m.replace(/^"|"\s*[,\]]$/g, ""));
+        const last = items.filter((x) => x !== "changes").pop();
+        if (last) { try { return { phase: "spec", text: `Planning: ${JSON.parse('"' + last + '"')}` }; } catch (e) { return { phase: "spec", text: `Planning: ${last}` }; } }
+    }
+    return { phase: "start", text: "Reading your app" };
+}
+
+// Apply {find, replace} edits in order. Each find must occur exactly once (exact text first, then
+// with line endings / trailing spaces normalised). Returns null if any edit can't be placed.
+function applyEdits(html, edits) {
+    let out = html;
+    const norm = (x) => x.replace(/\r\n/g, "\n").replace(/[ \t]+\n/g, "\n");
+    for (const e of edits) {
+        const find = String((e && e.find) || "");
+        const replace = String((e && e.replace) || "");
+        if (!find.trim()) return null;
+        let i = out.indexOf(find);
+        if (i >= 0 && out.indexOf(find, i + 1) < 0) { out = out.slice(0, i) + replace + out.slice(i + find.length); continue; }
+        if (i >= 0) return null; // ambiguous
+        const n = norm(out), f = norm(find);
+        i = n.indexOf(f);
+        if (i < 0 || n.indexOf(f, i + 1) >= 0) return null;
+        out = n.slice(0, i) + replace + n.slice(i + f.length);
+    }
+    return out;
+}
+
 function throttled(fn, ms) {
     let last = 0;
     return (x) => { const now = Date.now(); if (now - last >= ms) { last = now; fn(x); } };
@@ -335,6 +404,7 @@ function throttled(fn, ms) {
 
 async function build(data, onProgress) {
     if (!isConfigured()) throw notConfigured();
+    if (data.base && typeof data.base.html === "string" && data.base.html.length > 200 && !data.rewrite) return improve(data, onProgress);
     const who = whoOf(data.who);
     const answers = describeAnswers(data.answers);
     const user = [
@@ -346,7 +416,47 @@ async function build(data, onProgress) {
     const raw = await structured({ system: BUILD_PROMPT, user, tool: "save_app", description: "Save the finished app.", schema: APP_SCHEMA, maxTokens: 64000,
         onText: onProgress ? throttled((txt) => onProgress(progressFrom(txt)), 800) : null });
 
-    let html = String((raw && raw.html) || "").trim();
+    return finishApp(raw, String((raw && raw.html) || ""), data, who, { mode: data.base ? "rewrite" : "new" });
+}
+
+// Improve / fix: ask for edits (a few KB) instead of the whole app again; fall back to a full rewrite
+// only if the model chose one or an edit can't be placed.
+async function improve(data, onProgress) {
+    const who = whoOf(data.who);
+    const answers = describeAnswers(data.answers);
+    const user = [
+        `Who uses it: ${WHO[who]}`,
+        `Change request:\n${clip(data.prompt, 4000)}`,
+        answers ? `Decisions the person made:\n${answers}` : "",
+        baseBlock(data.base),
+    ].filter(Boolean).join("\n\n");
+    const raw = await structured({ system: EDIT_PROMPT, user, tool: "edit_app", description: "Save the edits.", schema: EDIT_SCHEMA, maxTokens: 64000,
+        onText: onProgress ? throttled((txt) => onProgress(progressEdit(txt)), 800) : null });
+    const edits = Array.isArray(raw && raw.edits) ? raw.edits : [];
+    const full = String((raw && raw.full_html) || "").trim();
+    let html = null, mode = "edit";
+    if (full) { html = full; mode = "rewrite"; }
+    else if (edits.length) html = applyEdits(data.base.html, edits);
+    else {
+        const e = new Error("no changes"); e.code = "bad_output";
+        e.detail = "The builder didn't find anything to change. Say exactly what should change, e.g. \"add 5 lessons on ...\".";
+        throw e;
+    }
+    if (html === null) {
+        // an edit didn't match the current code: redo it the old way, as a full rewrite
+        if (onProgress) onProgress({ phase: "start", text: "Rewriting the app instead" });
+        return build({ ...data, rewrite: true }, onProgress);
+    }
+    if (html === data.base.html) {
+        const e = new Error("unchanged"); e.code = "bad_output";
+        e.detail = "The edits didn't change anything. Say exactly what should change.";
+        throw e;
+    }
+    return finishApp(raw, html, data, who, { mode, edits: edits.length, changes: raw.changes });
+}
+
+function finishApp(raw, htmlIn, data, who, meta) {
+    let html = String(htmlIn || "").trim();
     if (!/<html[\s>]/i.test(html) || !/<\/html>/i.test(html)) throw badOutput("no complete html document", "The app came back unfinished (no complete page). Try again; if it keeps happening, ask for fewer features.");
     if (Buffer.byteLength(html) > MAX_HTML) throw badOutput("html too large", "The app came out bigger than 350 KB. Ask for fewer features, or build it in steps.");
     let secrets = null;
@@ -370,7 +480,10 @@ async function build(data, onProgress) {
         secrets,
         who,
         model: MODEL,
+        mode: meta.mode,
+        edits: meta.edits || 0,
+        changes: (Array.isArray(meta.changes) ? meta.changes : []).map((c) => clip(c, 140).trim()).filter(Boolean).slice(0, 6),
     };
 }
 
-module.exports = { plan, build, isConfigured, progressFrom, PROVIDER, MODEL, SDK };
+module.exports = { plan, build, isConfigured, progressFrom, progressEdit, applyEdits, PROVIDER, MODEL, SDK };
