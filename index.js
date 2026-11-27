@@ -15,6 +15,7 @@ const registerTaskHandlers = require("./tasks");
 const registerAppHandlers = require("./apps");
 const { registerPushHandlers } = require("./push");
 const registerStickyHandlers = require("./stickies");
+const registerSecretHandlers = require("./secrets");
 app.use(cors());
 
 // stats.json now lives in the persistent data volume; migrate the old file once if present
@@ -112,6 +113,7 @@ io.on("connection", function(socket){
     registerAppHandlers(io, socket);
     registerPushHandlers(io, socket);
     registerStickyHandlers(io, socket);
+    registerSecretHandlers(io, socket);
 
     socket.on("createRoom", function(data){
         if(data.room){
